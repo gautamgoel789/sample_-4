@@ -1,0 +1,97 @@
+name: Threat Modeling as Code
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  threatmodel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz default-jre
+          python3 -m pip install --upgrade pip
+          pip install threatspec
+
+      - name: Ensure threatspec.yaml exists
+        run: |
+          if [ ! -f threatspec.yaml ]; then threatspec init; fi
+
+      - name: Run ThreatSpec
+        run: |
+          threatspec run
+          threatspec report   # generates ThreatModel.md + ThreatModel.md.png
+
+      - name: Generate Mermaid / PlantUML sources
+        run: |
+          python3 scripts/generate_mermaid.py
+          python3 scripts/generate_plantuml.py
+
+      - name: Render Mermaid diagram to PNG
+        run: |
+          npm install -g @mermaid-js/mermaid-cli
+          mmdc -i diagrams/dfd.mmd -o diagrams/dfd.png
+
+      - name: Render PlantUML diagram to PNG (Docker)
+        run: |
+          docker run --rm -v "${{ github.workspace }}/diagrams:/work" plantuml/plantuml -tpng dfd.puml
+
+      - name: Fail if NEW critical threats
+        run: python3 scripts/check_new_critical.py
+
+      - name: Upload threatmodel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: threatmodel-artifacts
+          path: |
+            ThreatModel.md
+            ThreatModel.md.png
+            diagrams/dfd.mmd
+            diagrams/dfd.png
+            diagrams/dfd.puml
+            threatmodel/threatmodel.json
+            threatmodel/threats.json
+            threatmodel/controls.json
+            threatmodel/components.json
+
+      - name: Save evidence bundle
+        if: always()
+        run: |
+          mkdir -p evidence
+          cp ThreatModel.md ThreatModel.md.png evidence/ || true
+          cp diagrams/* evidence/ || true
+          cp threatmodel/*.json evidence/ || true
+          printf "## Threat Model CI Summary\nRun: $GITHUB_RUN_NUMBER\nDate: $(date)\n" > evidence/SUMMARY.md
+
+      - name: Upload evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-bundle
+          path: evidence/
+
+      - name: Commit updated diagrams & reports back to main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add diagrams/*.mmd diagrams/*.puml diagrams/*.png ThreatModel.md ThreatModel.md.png threatmodel/*.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(threatmodel): update report & diagrams [skip ci]"
+            git push
